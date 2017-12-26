@@ -1,0 +1,723 @@
+
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
+import java.lang.reflect.Type;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.UnknownHostException;
+import com.amazonaws.util.EC2MetadataUtils;
+import com.amazonaws.services.ec2.model.DescribeInstancesRequest;
+
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
+import java.nio.file.Paths;
+
+import java.time.Instant;
+import java.util.*;
+import java.net.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ExecutionException;
+import java.io.File;
+
+public class User {
+
+    InetAddress ec2IP;
+    Integer userId;
+    String name;
+    
+    //Need client name-ID mapping for blocked user bit.
+    ArrayList<UserClientConnector> connectedServers = new ArrayList<UserClientConnector>();
+    ConcurrentHashMap<Integer, String[]> userDetails = new ConcurrentHashMap<>();
+    ArrayList<UserConnector> connectedUsers = new ArrayList<UserConnector>();
+    HashMap<String, Integer> userIPUserID = new HashMap<String, Integer>();
+    ArrayList<String> unconnectedServers = new ArrayList<>();
+
+    ServerSocket serverSocket;
+    int numClients = 4;
+
+    //WuuBernstein initial conditions
+    Dictionary dictionary;
+    int eventCounter = 0;
+    NodeTable nodeTable;
+    EventLog log;
+
+    public User(String name,
+            InetAddress ec2IP,
+            int userId,
+            Dictionary dictionary,
+            NodeTable nodeTable,
+            EventLog log,
+            int eventCounter) {
+        this.name = name;
+        this.ec2IP = ec2IP;
+        this.userId = userId;
+        this.dictionary = dictionary;
+        this.nodeTable = nodeTable;
+        this.log = log;
+        this.eventCounter = eventCounter;
+    }
+
+    public ConcurrentHashMap<Integer, String[]> getUserDetails() {
+        return userDetails;
+    }
+
+    public void setUserDetails(ConcurrentHashMap<Integer, String[]> userDetails) {
+        this.userDetails = userDetails;
+    }
+
+    public HashMap<String, Integer> getUserIPUserID() {
+        return userIPUserID;
+    }
+
+    public void setUserIPUserID(HashMap<String, Integer> userIPUserID) {
+        this.userIPUserID = userIPUserID;
+    }
+
+    public ArrayList<UserConnector> getConnectedUsers() {
+        return connectedUsers;
+    }
+
+    public void setConnectedUsers(ArrayList<UserConnector> connectedUsers) {
+        this.connectedUsers = connectedUsers;
+    }
+
+    public ServerSocket getServerSocket() {
+        return serverSocket;
+    }
+
+    public void setServerSocket(ServerSocket serverSocket) {
+        this.serverSocket = serverSocket;
+    }
+
+    public NodeTable getNodeTable() {
+        return nodeTable;
+    }
+
+    public void setNodeTable(NodeTable nodeTable) {
+        this.nodeTable = nodeTable;
+    }
+
+    public ArrayList<UserClientConnector> getConnectedServers() {
+        return connectedServers;
+    }
+
+    public void setConnectedServers(ArrayList<UserClientConnector> connectedServers) {
+        this.connectedServers = connectedServers;
+    }
+
+    public ArrayList<String> getUnconnectedServers() {
+        return unconnectedServers;
+    }
+
+    public void setUnconnectedServers(ArrayList<String> unconnectedServers) {
+        this.unconnectedServers = unconnectedServers;
+    }
+
+    public User() {
+        name = new String();
+        try {
+            ec2IP = InetAddress.getByName("127.0.0.1");
+        } catch (UnknownHostException e) {
+            System.err.println("Could not establish connection with host. " + e);
+        }
+        userId = 1;
+        this.dictionary = new Dictionary();
+        this.log = new EventLog();
+        this.nodeTable = new NodeTable();
+        this.eventCounter = 0;
+        this.serverSocket = null;
+
+//        while(true){
+//            try {
+//                serverSocket = new ServerSocket(9001);
+//                System.out.println("Accepting connections");
+//
+//
+//                for(int i = 0; i < 3;i++)
+//                {
+//                    Socket clientSocket = serverSocket.accept();
+//                    System.out.println("I recognise a client");
+//                    UserConnector userConnector = new UserConnector(clientSocket, this);
+//                    userConnector.start();
+//                    connectedUsers.add(userConnector);
+//                }
+//
+//            } catch (IOException e) {
+//                e.printStackTrace();
+//            }
+//
+//        }
+    }
+
+    /*
+    Will be called from sendTweet to send tweet to a particular client
+     */
+    public UserConnector getThreadConnectedToClient(Integer userId) {
+        for (UserConnector uc : connectedUsers) {
+            if (uc.getClientID() == userId) {
+                return uc;
+            }
+        }
+        return null;
+    }
+
+
+    /*
+    Need a client for every other site that has come up
+    The client threads spawned will connect to the servers, and listen for input
+     */
+    public void startUserClients() {
+        //Creating a thread pool for N users I can connect to
+        final ExecutorService serverListeningPool = Executors.newFixedThreadPool(10);
+        User user = this;
+
+        //To unblock the other main operation
+        Runnable clientTask = new Runnable() {
+            @Override
+            public void run() {
+                System.out.println("Connecting to servers...");
+
+                for (int serverId : userDetails.keySet()) {
+                    String serverIPAddress = userDetails.get(serverId)[1];
+                    //Add an if condition to check if it is the current user, then don't connect
+                    UserClientConnector userClientConnector = new UserClientConnector(user, user.userId, serverIPAddress, user.getEc2IP().getHostAddress());
+                    connectedServers.add(userClientConnector);
+                    serverListeningPool.submit(userClientConnector);
+                }
+
+                while (true) {
+                    //Users are added to the unconnected servers only after 4 retries so this won't be tried too often
+                    while (unconnectedServers.iterator().hasNext()) {
+                        String serverIpAddress = unconnectedServers.iterator().next();
+                        //Add an if condition to check if it is the current user, then don't connect
+                        //On a successful connect the user will be removed
+                        UserClientConnector userClientConnector = new UserClientConnector(user, user.userId, serverIpAddress, user.getEc2IP().getHostAddress());
+                        connectedServers.add(userClientConnector);
+                        serverListeningPool.submit(userClientConnector);
+
+                    }
+                }
+            }
+        };
+        Thread serverThread = new Thread(clientTask);
+        serverThread.start();
+    }
+
+    public void startUserServer() {
+        //Creating a thread pool for N users I can connect to
+        final ExecutorService clientProcessingPool = Executors.newFixedThreadPool(10);
+        User user = this;
+
+        Runnable serverTask = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    serverSocket = new ServerSocket(9001);
+                    System.out.println("Accepting connections...");
+                    while (true) {
+                        Socket clientSocket = serverSocket.accept();
+                        System.out.println("I recognise a client" + clientSocket.getInetAddress() + " port : " + clientSocket.getPort());
+                        String ipAddress = clientSocket.getInetAddress().getHostAddress();
+                        String clientName = "";
+                        Integer clientId = 0;
+
+                        //Clients are identified by their IP address, as we have this stored in the config file
+                        if (userIPUserID.containsKey(ipAddress)) {
+                            clientId = userIPUserID.get(ipAddress);
+                            clientName = userDetails.get(clientId)[0];
+                        }
+
+                        UserConnector userConnector = new UserConnector(clientSocket, user, clientName, ipAddress, clientId);
+                        //userConnector.start();
+                        connectedUsers.add(userConnector);
+                        Future<?> future = clientProcessingPool.submit(userConnector);
+                        try {
+                            future.get();
+                        } catch (InterruptedException e) {
+                            System.err.println("Client Processing pool error. " + e);
+                        } catch (ExecutionException e) {
+                            System.err.println("Client " + clientName + " is disconnected. " + e);
+                        }
+                    }
+                } catch (IOException e) {
+                    System.err.println("Unable to process client request " + e);                   
+                }
+            }
+        };
+        Thread serverThread = new Thread(serverTask);
+        serverThread.start();
+    }
+
+    public synchronized String getPath(String filename) {
+        String workingDir = Paths.get(".").toAbsolutePath().normalize().toString();
+        String path = workingDir + File.separator + filename;
+        return path;
+    }
+
+    public synchronized void createFile(String filename) {
+        File file = new File(filename);
+        boolean b = false;
+        /*
+         * exists() method tests whether the file or directory denoted by this
+         * abstract pathname exists or not accordingly it will return TRUE /
+         * FALSE.
+         */
+        if (!file.exists()) {
+            /*
+           * createNewFile() method is used to creates a new, empty file
+           * mentioned by given abstract pathname if and only if a file with
+           * this name does not exist in given abstract pathname.
+             */
+            try {
+                b = file.createNewFile();
+                if (b) {
+                    //System.out.println("Empty File successfully created");
+                } else {
+                    //System.out.println("File exists");
+                }
+            } catch (IOException e) {
+                System.err.println("Could not create file. " + e);
+            }
+        }
+
+    }
+
+    /*
+    Reads from the file, and updates the User name, IP, ID
+     */
+    public void init() {
+        EC2MetadataUtils metadataUtils = new EC2MetadataUtils();
+<<<<<<< HEAD
+        System.out.println(metadataUtils.getNetworkInterfaces().get(0).getPublicHostname());
+        System.out.println("IP " + metadataUtils.getNetworkInterfaces().get(0).getPublicIPv4s().get(0));
+        //metadataUtils.getNetworkInterfaces()
+
+        String line = "";
+=======
+        //metadataUtils.getInstanceId();
+        System.out.println("Machine ID : " + userId);
+        createFile(getPath("mydictionary.json"));
+>>>>>>> 169476cc55d5ce7c70fe1295e6bc01abfc2b4332
+        createFile(getPath("nodeTable.json"));
+        createFile(getPath("mylog.json"));
+        String line = "";
+
+        //Load all the datastructures here
+        log.loadEventLog();
+        dictionary.loadDict();
+
+        //Loading user details into hashmap
+        BufferedReader reader = null;
+        try {
+            reader = new BufferedReader(new FileReader(getPath("IP_list.txt")));
+            while ((line = reader.readLine()) != null) {
+                String[] userLine = line.split(" ");
+                userDetails.put(Integer.valueOf(userLine[0]), new String[]{userLine[1], userLine[2]});
+                userIPUserID.put(userLine[2], Integer.valueOf(userLine[0]));
+            }
+
+//            //Can comment this out
+//            for (Integer key : userDetails.keySet()) {
+//                System.out.println("User: " + key + "Name: " + userDetails.get(key)[0] + "IP: " + userDetails.get(key)[1]);
+//            }
+
+            //Set the Ti to hold as many sites as in the userDetails file
+            nodeTable = new NodeTable(userDetails.size());
+            nodeTable.loadNodeTable();
+            //set counter to nodetable[i][i], this is especially needed in case of a crash
+            eventCounter = nodeTable.getNodeTable()[getUserId() - 1][getUserId() - 1];
+        } catch (IOException e) {
+            System.err.println("Could not open File: " + e);
+        }
+
+        //Connect to the servers, like establish multiple connections
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public InetAddress getEc2IP() {
+        return ec2IP;
+    }
+
+    public void setEc2IP(InetAddress ec2IP) {
+        this.ec2IP = ec2IP;
+    }
+
+    public Integer getUserId() {
+        return userId;
+    }
+
+    public void setUserId(Integer userId) {
+        this.userId = userId;
+    }
+
+    public Dictionary getDictionary() {
+        return dictionary;
+    }
+
+    public void setDictionary(Dictionary dictionary) {
+        this.dictionary = dictionary;
+    }
+
+    public int getNumClients() {
+        return numClients;
+    }
+
+    public void setNumClients(int numClients) {
+        this.numClients = numClients;
+    }
+
+    public int getEventCounter() {
+        return eventCounter;
+    }
+
+    public void setEventCounter(int eventCounter) {
+        this.eventCounter = eventCounter;
+    }
+
+    public EventLog getLog() {
+        return log;
+    }
+
+    public void setLog(EventLog log) {
+        this.log = log;
+    }
+
+    /*
+    Save the log, node table and dictionary to recover from a crash
+     */
+    public void saveToSolidState() {
+        log.saveEventLog();
+        nodeTable.saveNodeTable();
+        dictionary.saveDict();
+    }
+
+    /*
+    Wuu Bernstein functions implementation begins
+     */
+    public boolean hasRecord(int[][] nodeTable, Event eventRecord, int nodeK) {
+        if (nodeTable[nodeK - 1][eventRecord.getNodeId() - 1] >= eventRecord.getEventCounter()) {
+            return true;
+        }
+        return false;
+    }
+
+    public void blockUser(int nodeID) {
+        eventCounter += 1;
+        nodeTable.getNodeTable()[userId - 1][nodeID - 1] = eventCounter;
+        String blockedFollower = userDetails.get(nodeID)[0];
+        String userName = userDetails.get(userId)[0];
+        dictionary.addToDict(blockedFollower, userName);
+        Event blockEvent = new Event();
+        blockEvent.setNodeId(userId);
+        blockEvent.setContents(blockedFollower);
+        blockEvent.setEventCounter(eventCounter);
+        blockEvent.setTimestamp(Instant.now().toString());
+        blockEvent.setOpType(Event.OperationTypes.BLOCK);
+        log.addToEventLog(blockEvent);
+        saveToSolidState();
+    }
+
+    /*
+    Simulates the delete operation, wherein a (user,follower) pair is removed from the dictionary
+     */
+    public void unblockUser(int nodeID) {
+        eventCounter += 1;
+        nodeTable.getNodeTable()[userId - 1][nodeID - 1] = eventCounter;
+        String blockedFollower = userDetails.get(nodeID)[0];
+        String userName = userDetails.get(userId)[0];
+        dictionary.removeFromDict(blockedFollower, userName);
+        Event blockEvent = new Event();
+        blockEvent.setNodeId(userId);
+        blockEvent.setContents(blockedFollower);
+        blockEvent.setEventCounter(eventCounter);
+        blockEvent.setTimestamp(Instant.now().toString());
+        blockEvent.setOpType(Event.OperationTypes.UNBLOCK);
+        log.addToEventLog(blockEvent);
+        saveToSolidState();
+    }
+
+    /*
+    This function gets called by a server's wait thread
+    The received tweet from User pi is written to log
+    Also dictionary is updated
+    Also the log is updated
+    The message is read from the server's datainput stream buffer
+     */
+    public void receiveTweet(String tweet) {
+        /*
+        {"message":"Hey you","partialLog":"[{\"opType\":\"SEND\",\"eventCounter\":1,\"contents\":\"Hey you\",\"timestamp\":\"\",\"nodeId\":1}]",
+        "nodeTable":"[[0,0,0],[0,0,0],[0,0,0]]"}
+         */
+        System.out.println(" Message received + " + tweet);
+        Gson gson = new Gson();
+        Type messageType = new TypeToken<Message>() {
+        }.getType();
+
+        Integer sentUserId = 0;
+        Message messsageReceived = gson.fromJson(tweet, messageType);
+        int[][] receivedNodeTable = messsageReceived.getNodeTable().getNodeTable();
+        EventLog partialLog = messsageReceived.getPartialLog();
+        EventLog newEventLog = new EventLog();
+        Set<Event> newEvents = new HashSet<Event>();
+        //Extracting events from the received partial log, that are not already in j
+        for (Event events : partialLog.getLog()) {
+            if (!hasRecord(nodeTable.getNodeTable(), events, userId)) {
+                newEvents.add(events);
+            }
+        }
+
+        //Add block events to dictionary, only if an unblock doesn't exist
+        for (Event events : newEvents) {
+            if (events.getOpType() == Event.OperationTypes.BLOCK) {
+                //Add the user, follower combination if there is no unblock operation
+                if (!checkIfFollowerUnblockedAfterBlock(newEvents, events.getContents(), events.getNodeName())) {
+                    dictionary.addToDict(events.getContents(), events.getNodeName());
+                }
+            }
+        }
+        dictionary.saveDict();
+        int[][] myNodeTable = nodeTable.getNodeTable();
+        //Updating j's view of the world, with as much i knows.
+        for (int i = 0; i < userDetails.size(); i++) {
+            myNodeTable[userId - 1][i] = Math.max(myNodeTable[userId - 1][i], receivedNodeTable[sentUserId - 1][0]);
+        }
+
+        for (int k = 0; k < userDetails.size(); k++) {
+            for (int l = 0; l < userDetails.size(); l++) {
+                myNodeTable[k][l] = Math.max(myNodeTable[k][l], receivedNodeTable[k][l]);
+            }
+        }
+
+        nodeTable.setNodeTable(myNodeTable);
+        nodeTable.saveNodeTable();
+
+        //Merge my log with the new events log
+        log.addMultipleEvents(newEvents);
+        //Remove the events that are present in j's log which other processes know about.
+        //Don't read from disk here, as it is a union of two lists
+        EventLog logDiskReplace = new EventLog();
+
+        for (Event event : log.getLog()) {
+            for (int j = 0; j < userDetails.size(); j++) {
+                if (!hasRecord(myNodeTable, event, j)) {
+                    logDiskReplace.addToEventLog(event);
+                }
+            }
+        }
+
+        log = logDiskReplace;
+        log.saveEventLog();
+        System.out.println(" I am the server and I have received your " + gson.toJson(messsageReceived));
+    }
+
+    /*
+    Add to dictionary only if there isn't an unblock operation for the same user, follower pair.
+     */
+    public synchronized boolean checkIfFollowerUnblockedAfterBlock(Set<Event> allEvents, String blockedUser, String blockedByUser) {
+        for (Event event : allEvents) {
+            if (event.getOpType().equals(Event.OperationTypes.UNBLOCK)) {
+                if (event.getNodeName().equals(blockedByUser) && event.getContents().equals(blockedUser)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+
+    }
+
+    public void sendTweet(String tweet) {
+        Event sendEvent = new Event();
+        eventCounter += 1;
+        nodeTable.getNodeTable()[userId - 1][userId - 1] = eventCounter;
+        nodeTable.setNodeTable(nodeTable.getNodeTable());
+        sendEvent.setNodeId(userId);
+        sendEvent.setNodeName(userDetails.get(userId)[0]);
+        sendEvent.setContents(tweet);
+        sendEvent.setEventCounter(eventCounter);
+        sendEvent.setTimestamp(Instant.now().toString());
+        sendEvent.setOpType(Event.OperationTypes.SEND);
+        log.addToEventLog(sendEvent);
+        saveToSolidState();        
+        for (int i = 0; i < connectedUsers.size(); i++) {
+            Set<Event> partialEvents = new HashSet<Event>();
+            int clientId = connectedUsers.get(i).getClientID();
+
+            /*
+            Don't send data to my own machine, send to every other machine connected to me
+            If client is blocked by user then don't send tweets
+             */
+            if (clientId != userId 
+                    && !dictionary.amIBlocked(userDetails.get(clientId)[0], userDetails.get(userId)[0])) {
+
+                //Build partial log of all messages that the node j hasn't seen
+                for (Event event : log.getLog()) {
+                    if (!hasRecord(nodeTable.getNodeTable(), event, clientId)) {
+                        partialEvents.add(event);
+                    }
+                }
+
+                /*
+                  Build a json that can be sent over the network as a string
+                  Eg: {"message":"Hey","nodeTable":[[0,1],[2,3]],"NP":log}
+                 */
+                //Fetch thread assigned to this user, and send message on this node
+                UserConnector ServerConnectionThread = connectedUsers.get(i);
+                if (ServerConnectionThread != null) {
+                    EventLog partialLog = new EventLog();
+                    Message messagePayload = new Message();
+                    messagePayload.setMessage(tweet);
+                    messagePayload.setNodeTable(nodeTable);
+                    partialLog.addMultipleEvents(partialEvents);
+                    messagePayload.setPartialLog(partialLog);
+                    messagePayload.setUserID(userId);
+                    Gson g = new Gson();
+                    String messageString = g.toJson(messagePayload);
+                    System.out.println(messageString);
+                    try {
+                        ServerConnectionThread.sendTweetToUser(messageString);
+                        System.out.println("Sending a tweet to : " + ServerConnectionThread.getClientName() + " on " + ServerConnectionThread.getIpAddress());
+                    } catch (IOException e) {
+                        //Close the clientsocket if this client has disconnected, and free this from the client
+                        try {
+                            ServerConnectionThread.clientsocket.close();
+                            connectedUsers.remove(ServerConnectionThread);
+                        } catch (IOException e1) {
+                            System.err.println("Could not remove client thread. " + e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /*
+    Just prints out the log to the console
+    Tweets are shown in timestamp order
+
+     */
+    public void viewTimeline() {
+        List<Event> events = log.getSortedLog();
+        List<String> tweetsList = new ArrayList<String>();
+        for (Event event : events) {
+            /*
+            If current machine is blocked by sender of tweet, then don't show the tweet
+             */
+            if (event.getOpType() == Event.OperationTypes.SEND 
+                    && !dictionary.amIBlocked(userDetails.get(userId)[0], event.getNodeName())) {
+                tweetsList.add(event.getTimestamp() + " : " + event.getNodeName() + " says " + event.getContents());
+
+            }
+        }
+        for (String tweet : tweetsList) {
+            System.out.println(tweet);
+        }
+    }
+
+    public static void main(String[] args) {
+        User u1 = new User();
+        u1.init();
+
+        //Spawn clients
+        u1.startUserServer();
+        u1.startUserClients();
+        
+        boolean menudriven = true;
+        //Trying to simulate the broadcast scenario
+        while (menudriven) {
+            System.out.println("Enter 1 to Send Message");
+            System.out.println("Enter 2 to View Timeline");
+            System.out.println("Enter 3 to View Dictionary");
+            System.out.println("Enter 4 to Block Someone");
+            System.out.println("Enter 5 to UnBlock Someone");
+<<<<<<< HEAD
+            System.out.println("Enter 7 to View client and servers");
+            System.out.println("Enter 6 to Quit");
+            System.out.println("\n");
+=======
+            System.out.println("Enter 6 to Quit\n");
+>>>>>>> 169476cc55d5ce7c70fe1295e6bc01abfc2b4332
+            Scanner in = new Scanner(System.in);
+            int input = in.nextInt();
+
+            switch (input) {
+                case 1: {
+                    System.out.println("Enter the message you would like to send:");
+                    in.nextLine();
+                    String tweetToSend = in.nextLine();
+                    u1.sendTweet(tweetToSend);
+                    break;
+                }
+
+                case 2: {
+                    u1.viewTimeline();
+                    System.out.println("\n");
+                    break;
+                }
+
+                case 3: {
+                    u1.dictionary.printDict();
+                    System.out.println("\n");
+                    break;
+                }
+
+                case 4: {
+                    System.out.println("Who would you like to BLOCK?");
+                    
+                    for (Integer key: u1.getUserDetails().keySet()) {
+                        System.out.println("\tUser: " + key + "\tName: " + u1.getUserDetails().get(key)[0]);
+                    }                    
+                    System.out.println("Enter userID to block:\n");
+                    int idToBlock = in.nextInt();
+                    u1.blockUser(idToBlock);
+                    System.out.println("User has been blocked!\n");
+                    break;
+                }
+
+                case 5: {
+                    System.out.println("Who would you like to UNBLOCK?");
+                    for (Integer key: u1.getUserDetails().keySet()) {
+                        System.out.println("\tUser: " + key + "\tName: " + u1.getUserDetails().get(key)[0]);
+                    }
+                    System.out.println("Enter userID to unblock:");
+                    int idToUnblock = in.nextInt();
+                    u1.unblockUser(idToUnblock);
+                    System.out.println("User has been unblocked!\n");
+                    break;
+                }
+<<<<<<< HEAD
+
+                case 7:{
+                    System.out.println("connected servers");
+                    for(UserClientConnector clientConnector:u1.getConnectedServers()){
+                        System.out.println(clientConnector.getServerIPAddress());
+                    }
+                    System.out.println("connected clients");
+                    for(UserConnector clientConnector:u1.getConnectedUsers()){
+                        System.out.println(clientConnector.getIpAddress());
+                    }
+                }
+                
+=======
+                case 6: {
+                    System.out.println("Bye bye!");
+                    System.exit(0);
+                }
+
+>>>>>>> 169476cc55d5ce7c70fe1295e6bc01abfc2b4332
+                default:
+                    System.out.println("Error! Please enter menu items 1-6.");
+            }
+        }
+    }
+}
